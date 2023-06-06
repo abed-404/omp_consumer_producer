@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <omp.h>
+#include <time.h>
 
 #define MAX_SENTENCE_LENGTH 1000
 
@@ -19,6 +20,7 @@ typedef struct msg_queue{
 } msg_queue;
 
 void Read_chunk_of_messages (char* filename, int thread_num, int chunk_size, msg_queue* dest);
+void Read_chunk_of_messages_randomly (char* filename, int thread_num, int chunk_size, msg_queue* queues[4]);
 msg_queue* Allocate_queue();
 void Free_queue(msg_queue* q);
 void Print_queue(msg_queue* q, int queue_num);
@@ -27,6 +29,7 @@ q_node* Dequeue(msg_queue* q, int my_rank);
 void Procces_msg(const char* sentence, int thread_num, int* word_counter, int* char_counter);
 
 int main() {
+    srand(time(NULL));
     char* fileName = "text.txt";
     int totalSentences = 40;
     int producers_num = 8, consumers_num = 4;
@@ -46,6 +49,7 @@ int main() {
         if (my_rank < producers_num){
             int dest = (my_rank / 2) % consumers_num; // to find the destination queue
             Read_chunk_of_messages(fileName, my_rank, sentencesPerChunk, consumers_queues[dest]);
+            // Read_chunk_of_messages_randomly(fileName, my_rank, sentencesPerChunk, consumers_queues);
             #pragma omp atomic
             done_sending++;
         }
@@ -189,4 +193,36 @@ void Procces_msg(const char* sentence, int thread_num, int* word_counter, int* c
     }
     *word_counter += num_words;
     *char_counter += num_chars;
+}
+void Read_chunk_of_messages_randomly (char* filename, int thread_num, int chunk_size, msg_queue* queues[4]){
+    FILE* file = fopen(filename, "r"); // Open the file for reading
+    if (file == NULL) {
+        printf("Failed to open the file.\n");
+        return 1;
+    }
+    fseek(file, 0, SEEK_SET);
+    char line[MAX_SENTENCE_LENGTH];
+
+    // Find the starting position for the current chunk
+    int start = thread_num * chunk_size;
+    // Move to the starting position
+    fseek(file, 0, SEEK_SET);
+    for (int j = 0; j < start; j++) {
+        fgets(line, sizeof(line), file);
+    }
+    // Read and print the sentences in the current chunk
+    for (int k = 0; k < chunk_size; k++) {
+        if (fgets(line, sizeof(line), file) != NULL) {
+            //printf("thread %d read >> %s", thread_num, line);
+            int index = rand() % 4;
+            omp_set_lock(&queues[index]->lock);
+            Enqueue(queues[index], thread_num, line);
+            omp_unset_lock(&queues[index]->lock);
+        } else {
+            printf("\n");
+            break; // Reached the end of the file
+        }
+    }
+    fclose(file);
+
 }
