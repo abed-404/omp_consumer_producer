@@ -1,0 +1,6 @@
+# depslib dependency file v1.0
+1686048435 source:e:\desktop\kareem\parallekl\final_homework\final_homework\main.c
+	<stdio.h>
+	<stdlib.h>
+	<omp.h>
+

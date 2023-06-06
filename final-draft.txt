@@ -1,0 +1,179 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <omp.h>
+
+#define MAX_SENTENCE_LEN 1000
+#define MAX_SENTENCES 100
+#define MAX_LENGTH 1000
+
+struct list_node_s {
+    char* data;
+    struct list_node_s* next;
+};
+
+void Prod_cons(int prod_count, int cons_count, char sentences[MAX_SENTENCES][MAX_LENGTH], int sentence_count);
+void Read_message(char* sentence, struct list_node_s** queue_head, struct list_node_s** queue_tail, int my_rank);
+void Count_words_chars(const char* sentence, int thread_rank, int* word_counter, int* char_counter);
+void Enqueue(char* line, struct list_node_s** queue_head, struct list_node_s** queue_tail, omp_lock_t* queue_lock);
+struct list_node_s* Dequeue(struct list_node_s** queue_head, struct list_node_s** queue_tail, omp_lock_t* queue_lock);
+
+int main(int argc, char* argv[]) {
+    int prod_count, cons_count;
+    FILE *file = fopen("example.txt", "r");
+    if (file == NULL) {
+        printf("Failed to open the file.\n");
+        return 1;
+    }
+
+    char sentences[MAX_SENTENCES][MAX_LENGTH];
+    int sentenceCount = 0;
+
+    while (fgets(sentences[sentenceCount], MAX_LENGTH, file) != NULL && sentenceCount < MAX_SENTENCES) {
+        sentences[sentenceCount][strcspn(sentences[sentenceCount], "\n")] = '\0';
+        sentenceCount++;
+    }
+
+    prod_count = 8;
+    cons_count = 4;
+    printf("prod_count = %d, cons_count = %d, sentence_count = %d\n",
+    prod_count, cons_count, sentenceCount);
+
+    Prod_cons(prod_count, cons_count, sentences, sentenceCount);
+
+    fclose(file);
+
+    return 0;
+}
+
+void Prod_cons(int prod_count, int cons_count, char sentences[MAX_SENTENCES][MAX_LENGTH], int sentence_count) {
+    int thread_count = prod_count + cons_count;
+    struct list_node_s* queue_head = NULL;
+    struct list_node_s* queue_tail = NULL;
+    int prod_done_count = 0;
+    int words_counters[4] = {0};
+    int char_counters[4] = {0};
+    omp_lock_t queue_lock;
+    omp_init_lock(&queue_lock);
+
+    #pragma omp parallel num_threads(thread_count) default(none) shared(sentence_count, sentences, queue_head, queue_tail, prod_count, cons_count, prod_done_count, queue_lock, words_counters, char_counters)
+    {
+        int my_rank = omp_get_thread_num(), sen;
+
+        if (my_rank < prod_count) {
+            // producer code
+            for (sen = my_rank; sen < sentence_count; sen += prod_count) {
+                Read_message(sentences[sen], &queue_head, &queue_tail, my_rank);
+            }
+            #pragma omp atomic
+            prod_done_count++;
+        }
+        else {
+            // Consumer code
+            struct list_node_s* tmp_node;
+            while (prod_done_count < prod_count) {
+                tmp_node = Dequeue(&queue_head, &queue_tail, &queue_lock);
+                if (tmp_node != NULL) {
+                    Count_words_chars(tmp_node->data, my_rank, &words_counters[my_rank - 8], &char_counters[my_rank - 8]);
+                    free(tmp_node);
+                }
+            }
+            // to check if all the messages in the queue has been read
+            while (queue_head != NULL) {
+                tmp_node = Dequeue(&queue_head, &queue_tail, &queue_lock);
+                if (tmp_node != NULL) {
+                    Count_words_chars(tmp_node->data, my_rank, &words_counters[my_rank - 8], &char_counters[my_rank - 8]);
+                    free(tmp_node);
+                }
+            }
+        }
+    }
+    int words_number = 0;
+    int char_numbers = 0;
+    for (int i = 0; i < cons_count; i++){
+        words_number += words_counters[i];
+        char_numbers += char_counters[i];
+    }
+    printf("\n-----------------------------------------------------------------\n");
+    printf("Number of words in the text is %d and number of characters is %d\n", words_number, char_numbers);
+    printf("-----------------------------------------------------------------\n");
+    omp_destroy_lock(&queue_lock);
+}
+
+void Read_message(char* sentence, struct list_node_s** queue_head, struct list_node_s** queue_tail, int my_rank) {
+    char* line = malloc(MAX_LENGTH * sizeof(char));
+    strcpy(line, sentence); // Copy the sentence into the line variable
+    printf("Th %d > read line: %s \n", my_rank, line);
+    Enqueue(line, queue_head, queue_tail, NULL);
+}
+
+void Count_words_chars(const char* sentence, int thread_rank, int* word_counter, int* char_counter) {
+    int num_chars = 0;
+    int num_words = 0;
+    int i = 0;
+    int len = strlen(sentence);
+
+    for (i = 0; i < len; i++) {
+        // Count characters
+        if (sentence[i] != ' ' && sentence[i] != '\n') {
+            num_chars++;
+        }
+
+        // Count words
+        if ((i == 0 || sentence[i - 1] == ' ') && sentence[i] != ' ') {
+            num_words++;
+        }
+    }
+    *word_counter += num_words;
+    *char_counter += num_chars;
+    #pragma omp critical
+    printf("Consumer %d > Sentence contains %d characters and %d words.\n", thread_rank, num_chars, num_words);
+}
+
+void Enqueue(char* line, struct list_node_s** queue_head, struct list_node_s** queue_tail, omp_lock_t* queue_lock) {
+    struct list_node_s* tmp_node = malloc(sizeof(struct list_node_s));
+    tmp_node->data = line;
+    tmp_node->next = NULL;
+
+    if (queue_lock != NULL) {
+        omp_set_lock(queue_lock);
+    }
+
+    if (*queue_tail == NULL) {
+        *queue_head = tmp_node;
+        *queue_tail = tmp_node;
+    } else {
+        (*queue_tail)->next = tmp_node;
+        *queue_tail = tmp_node;
+    }
+
+    if (queue_lock != NULL) {
+        omp_unset_lock(queue_lock);
+    }
+}
+
+struct list_node_s* Dequeue(struct list_node_s** queue_head, struct list_node_s** queue_tail, omp_lock_t* queue_lock) {
+    struct list_node_s* tmp_node = NULL;
+    if (queue_lock != NULL) {
+        omp_set_lock(queue_lock);
+    }
+    if (*queue_head == NULL) {
+        if (queue_lock != NULL) {
+            omp_unset_lock(queue_lock);
+        }
+        return NULL;
+    }
+
+    tmp_node = *queue_head;
+    *queue_head = (*queue_head)->next;
+    tmp_node->next == NULL;
+    if (*queue_head == NULL) { // if the nodew we had dequed was the last one
+        *queue_tail = NULL;
+    }
+
+    if (queue_lock != NULL) {
+        omp_unset_lock(queue_lock);
+    }
+
+    return tmp_node;
+}
